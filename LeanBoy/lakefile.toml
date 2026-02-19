@@ -1,0 +1,21 @@
+name = "LeanBoy"
+version = "0.1.0"
+defaultTargets = ["leanboy"]
+
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries"
+rev = "v4.24.0"
+
+[[lean_lib]]
+name = "LeanBoy"
+
+[[lean_exe]]
+name = "leanboy"
+root = "Main"
+moreLinkArgs = ["-L/opt/homebrew/lib", "-lSDL2"]
+moreServerArgs = ["-I/opt/homebrew/include", "-I/opt/homebrew/include/SDL2"]
+
+[[extern_lib]]
+name = "sdl_frontend"
+srcDir = "ffi"
