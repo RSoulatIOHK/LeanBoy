@@ -62,8 +62,24 @@ def main (args : List String) : IO Unit := do
     if dbgLevel > 0 then
       IO.eprintln s!"[DBG] debug level = {dbgLevel}"
 
+    -- Derive .sav path from ROM path (e.g. "game.gb" → "game.sav")
+    let savPath :=
+      let stem := if romPath.endsWith ".gb" || romPath.endsWith ".gbc"
+                  then romPath.dropRight 3
+                  else romPath
+      stem ++ ".sav"
+
     let romBytes ← IO.FS.readBinFile romPath
     let emu ← Emulator.create romBytes (printSerial := true)
+
+    -- Load existing .sav if present
+    let mut savLoaded := false
+    if ← System.FilePath.pathExists savPath then
+      let savBytes ← IO.FS.readBinFile savPath
+      emu.loadSaveRam savBytes
+      savLoaded := true
+      IO.eprintln s!"[SAV] Loaded {savBytes.size} bytes from {savPath}"
+
     let rc ← init
     if rc < 0 then
       IO.eprintln "Failed to initialise SDL2"
@@ -96,17 +112,25 @@ def main (args : List String) : IO Unit := do
             if frameSteps == 100000 || frameSteps == 1000000 || frameSteps == 5000000 then
               let cpu ← emu.cpuRef.get
               let gpu ← emu.bus.gpu.get
+              let ic  ← emu.bus.interrupt.get
+              let jp  ← emu.bus.joypad.get
+              -- 8 bytes at PC so we can see what instruction it's stuck on
+              let pcBytes ← (List.range 8).mapM (fun i => emu.bus.readByte (cpu.pc + i.toUInt16))
               let d ← (List.range 32).mapM (fun i => emu.bus.readByte (0xC4DA + i).toUInt16)
               IO.eprintln s!"[WDG] frame={totalFrames} steps={frameSteps} \
 PC=0x{hexWord cpu.pc} SP=0x{hexWord cpu.sp} IME={cpu.ime} halted={cpu.halted}"
+              IO.eprintln s!"[WDG] IE=0x{hexByte ic.ie} IF=0x{hexByte ic.ifl} \
+JP.p1=0x{hexByte jp.p1} dir=0x{hexByte jp.direction} act=0x{hexByte jp.action}"
+              IO.eprintln s!"[WDG] PC bytes: {hexDump (ByteArray.mk pcBytes.toArray) 0 8}"
               IO.eprintln s!"[WDG] GPU mode={reprStr gpu.mode} dots={gpu.dots} \
 LY={gpu.lcdPosition.ly} STAT=0x{hexByte gpu.lcdStat.value}"
               IO.eprintln s!"[WDG] 0xC4DA+: {hexDump (ByteArray.mk d.toArray) 0 32}"
             let result ← emu.step
             match result with
-            | none    => pure ()
-            | some fb =>
+            | none           => pure ()
+            | some (fb, audio) =>
                 presentFrame (frameBufferToBytes fb)
+                queueAudio audio
                 frameDone     := true
                 totalFrames   := totalFrames + 1
                 -- FPS counter: print every 60 frames (always)
@@ -141,5 +165,12 @@ IME={cpu.ime}  halted={cpu.halted}"
           IO.eprintln s!"[CRASH] TileMap 0x9C00 row0: {hexDump gpu.tileMap.data 1024 32}"
           dumpTileData gpu.tileData.data 4 0  -- always dump (level override = 0)
           running := false
+
+    -- Save battery-backed RAM on clean exit
+    let cart ← emu.bus.cartridge.get
+    if cart.hasBattery && (savLoaded || cart.isRamDirty) then
+      let ram := cart.getRam
+      IO.FS.writeBinFile savPath ram
+      IO.eprintln s!"[SAV] Saved {ram.size} bytes to {savPath}"
 
     destroy

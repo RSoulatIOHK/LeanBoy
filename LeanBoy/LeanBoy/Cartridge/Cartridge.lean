@@ -33,6 +33,36 @@ def writeByte (cart : Cartridge) (addr : UInt16) (v : UInt8) : Cartridge :=
   | mbc2    c => mbc2    (c.writeByte addr v)
   | mbc3    c => mbc3    (c.writeByte addr v)
 
+-- Returns the battery-backed RAM (empty ByteArray if none).
+def getRam (cart : Cartridge) : ByteArray :=
+  match cart with
+  | romOnly _ => ByteArray.empty
+  | mbc1    c => c.ram
+  | mbc2    c => c.ram
+  | mbc3    c => c.ram
+
+-- Replace the RAM contents (used to restore a .sav file).
+def withRam (cart : Cartridge) (ram : ByteArray) : Cartridge :=
+  match cart with
+  | romOnly c => romOnly c
+  | mbc1    c => mbc1 { c with ram }
+  | mbc2    c => mbc2 { c with ram }
+  | mbc3    c => mbc3 { c with ram }
+
+def hasBattery (cart : Cartridge) : Bool :=
+  match cart with
+  | romOnly _ => false
+  | mbc1    c => c.hasBattery
+  | mbc2    c => c.hasBattery
+  | mbc3    c => c.hasBattery
+
+def isRamDirty (cart : Cartridge) : Bool :=
+  match cart with
+  | romOnly _ => false
+  | mbc1    c => c.ramDirty
+  | mbc2    c => c.ramDirty
+  | mbc3    c => c.ramDirty
+
 -- Detect cartridge type and create the appropriate variant.
 def detect (rom : ByteArray) : Except String Cartridge := do
   let header ← CartridgeHeader.parse rom
@@ -41,13 +71,13 @@ def detect (rom : ByteArray) : Except String Cartridge := do
   match header.cartridgeType with
   | .RomOnly         => return romOnly (RomOnly.create rom)
   | .Mbc1            => return mbc1 (Mbc1.create rom ByteArray.empty)
-  | .Mbc1Ram
-  | .Mbc1RamBattery  => return mbc1 (Mbc1.create rom ram)
-  | .Mbc2
-  | .Mbc2Battery     => return mbc2 (Mbc2.create rom)
+  | .Mbc1Ram         => return mbc1 (Mbc1.create rom ram)
+  | .Mbc1RamBattery  => return mbc1 (Mbc1.create rom ram (hasBattery := true))
+  | .Mbc2            => return mbc2 (Mbc2.create rom)
+  | .Mbc2Battery     => return mbc2 (Mbc2.create rom (hasBattery := true))
   | .Mbc3            => return mbc3 (Mbc3.create rom ByteArray.empty)
-  | .Mbc3Ram
-  | .Mbc3RamBattery  => return mbc3 (Mbc3.create rom ram)
+  | .Mbc3Ram         => return mbc3 (Mbc3.create rom ram)
+  | .Mbc3RamBattery  => return mbc3 (Mbc3.create rom ram (hasBattery := true))
 
 end Cartridge
 

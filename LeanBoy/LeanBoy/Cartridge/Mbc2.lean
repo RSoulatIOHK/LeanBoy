@@ -15,11 +15,13 @@ structure Mbc2 where
   ram        : ByteArray              -- 512 bytes (lower nibble only)
   romBank    : UInt8 := 0x01
   ramEnabled : Bool  := false
+  hasBattery : Bool  := false
+  ramDirty   : Bool  := false
 
 namespace Mbc2
 
-def create (rom : ByteArray) : Mbc2 :=
-  { rom, ram := ByteArray.mk (Array.replicate 512 0) }
+def create (rom : ByteArray) (hasBattery : Bool := false) : Mbc2 :=
+  { rom, ram := ByteArray.mk (Array.replicate 512 0), hasBattery }
 
 def readByte (m : Mbc2) (addr : UInt16) : UInt8 :=
   if addr < 0x4000 then
@@ -44,7 +46,7 @@ def writeByte (m : Mbc2) (addr : UInt16) (v : UInt8) : Mbc2 :=
       { m with romBank := if bank == 0 then 1 else bank }
   else if addr >= 0xA000 && addr < 0xA200 then
     if m.ramEnabled then
-      { m with ram := m.ram.set! (addr.toNat - 0xA000) (v &&& 0x0F) }
+      { m with ram := m.ram.set! (addr.toNat - 0xA000) (v &&& 0x0F), ramDirty := true }
     else m
   else m
 

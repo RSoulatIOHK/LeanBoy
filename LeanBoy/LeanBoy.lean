@@ -22,6 +22,7 @@ import LeanBoy.Gpu.LcdPosition
 import LeanBoy.Gpu.Palette
 import LeanBoy.Gpu.OamTable
 import LeanBoy.Gpu.Gpu
+import LeanBoy.Apu
 import LeanBoy.Bus
 import LeanBoy.Cpu.Instruction
 import LeanBoy.Cpu.FetchAndDecode

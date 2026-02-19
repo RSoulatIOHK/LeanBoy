@@ -22,10 +22,13 @@ structure Mbc1 where
   ramBank      : UInt8 := 0x00
   ramEnabled   : Bool  := false
   bankingMode  : Bool  := false   -- false=ROM mode, true=RAM mode
+  hasBattery   : Bool  := false
+  ramDirty     : Bool  := false
 
 namespace Mbc1
 
-def create (rom ram : ByteArray) : Mbc1 := { rom, ram }
+def create (rom ram : ByteArray) (hasBattery : Bool := false) : Mbc1 :=
+  { rom, ram, hasBattery }
 
 -- Compute the effective ROM bank (enforces that bank 0 maps to 1).
 private def effectiveRomBank (m : Mbc1) : Nat :=
@@ -65,7 +68,7 @@ def writeByte (m : Mbc1) (addr : UInt16) (v : UInt8) : Mbc1 :=
     if m.ramEnabled && !m.ram.isEmpty then
       let offset := (effectiveRamBank m) * 0x2000 + (addr.toNat - 0xA000)
       if offset < m.ram.size then
-        { m with ram := m.ram.set! offset v }
+        { m with ram := m.ram.set! offset v, ramDirty := true }
       else m
     else m
   else m

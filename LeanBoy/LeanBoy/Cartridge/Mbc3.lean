@@ -18,10 +18,13 @@ structure Mbc3 where
   romBank    : UInt8 := 0x01
   ramBank    : UInt8 := 0x00
   ramEnabled : Bool  := false
+  hasBattery : Bool  := false
+  ramDirty   : Bool  := false
 
 namespace Mbc3
 
-def create (rom ram : ByteArray) : Mbc3 := { rom, ram }
+def create (rom ram : ByteArray) (hasBattery : Bool := false) : Mbc3 :=
+  { rom, ram, hasBattery }
 
 def readByte (m : Mbc3) (addr : UInt16) : UInt8 :=
   if addr < 0x4000 then
@@ -53,7 +56,7 @@ def writeByte (m : Mbc3) (addr : UInt16) (v : UInt8) : Mbc3 :=
     if m.ramEnabled && m.ramBank <= 0x03 then
       let offset := m.ramBank.toNat * 0x2000 + (addr.toNat - 0xA000)
       if offset < m.ram.size then
-        { m with ram := m.ram.set! offset v }
+        { m with ram := m.ram.set! offset v, ramDirty := true }
       else m
     else m
   else m

@@ -25,6 +25,11 @@ opaque presentFrame (pixels : ByteArray) : IO Unit
 @[extern "lean_sdl_poll_events"]
 opaque pollEvents : IO UInt32
 
+-- Queue interleaved stereo S16LE audio samples to the SDL audio device.
+-- Has built-in backpressure: skips if > 4 frames are already buffered.
+@[extern "lean_sdl_audio_queue"]
+opaque queueAudio (samples : ByteArray) : IO Unit
+
 -- Convert a FrameBuffer (Array (Array UInt8)) to a flat ByteArray (row-major).
 def frameBufferToBytes (fb : Gpu.FrameBuffer) : ByteArray :=
   let n := fb.size * (if fb.size > 0 then fb[0]!.size else 0)

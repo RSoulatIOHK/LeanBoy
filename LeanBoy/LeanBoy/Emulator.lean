@@ -35,9 +35,10 @@ def create (romBytes : ByteArray) (printSerial : Bool := false) : IO Emulator :=
 LCDC=0x{hexByte gpu.lcdControl.value}  BGP=0x{hexByte gpu.palettes.bgp.value}"
   return { cpuRef, bus, frameNo }
 
--- Run one CPU instruction, tick the GPU and Timer accordingly.
--- Returns `some frameBuffer` when a full frame has been rendered.
-def step (emu : Emulator) : IO (Option FrameBuffer) := do
+-- Run one CPU instruction, tick the GPU, Timer, and APU accordingly.
+-- Returns `some (frameBuffer, audioSamples)` when a full frame has been rendered.
+-- audioSamples is an interleaved stereo S16LE ByteArray at 44100 Hz.
+def step (emu : Emulator) : IO (Option (FrameBuffer × ByteArray)) := do
   let cycles ← Cpu.Cpu.runInstruction emu.cpuRef
   -- runInstruction returns M-cycles; GPU and Timer thresholds are in T-cycles.
   -- 1 M-cycle = 4 T-cycles on the Game Boy.
@@ -55,12 +56,32 @@ def step (emu : Emulator) : IO (Option FrameBuffer) := do
   emu.bus.gpu.set gpu'
   emu.bus.interrupt.set ic''
   dbgIO   -- execute any debug IO from the GPU tick
+  -- Tick APU
+  emu.bus.apu.modify (fun a => a.tick tCycles.toUInt32)
   match result with
   | .InFrame        => return none
   | .FrameEnded fb  =>
     let fn' ← emu.frameNo.get
     emu.frameNo.set (fn' + 1)
-    return some fb
+    -- Drain accumulated audio samples for this frame (only the filled portion)
+    let apu ← emu.bus.apu.get
+    let byteCount := apu.sampleCount.toNat * 4
+    let audioSamples := apu.samples.extract 0 byteCount
+    emu.bus.apu.set { apu with sampleCount := 0 }
+    return some (fb, audioSamples)
+
+-- Returns Some ram if the cartridge is battery-backed and has non-empty RAM
+-- and was either written to (dirty) or had a save loaded. Returns None otherwise.
+def getSaveRam (emu : Emulator) : IO (Option ByteArray) := do
+  let cart ← emu.bus.cartridge.get
+  if cart.hasBattery && cart.isRamDirty then
+    return some (cart.getRam)
+  else
+    return none
+
+-- Load save RAM into the cartridge (used to restore a .sav file on startup).
+def loadSaveRam (emu : Emulator) (ram : ByteArray) : IO Unit := do
+  emu.bus.cartridge.modify (fun c => c.withRam ram)
 
 -- Press a key (generates a joypad interrupt).
 def pressKey (emu : Emulator) (k : Key) : IO Unit := do
@@ -73,6 +94,7 @@ def pressKey (emu : Emulator) (k : Key) : IO Unit := do
 -- Release a key.
 def releaseKey (emu : Emulator) (k : Key) : IO Unit := do
   emu.bus.joypad.modify (fun jp => jp.release k)
+
 
 end Emulator
 

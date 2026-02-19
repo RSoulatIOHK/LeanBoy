@@ -17,9 +17,10 @@
 #define GB_H  144
 #define SCALE 3
 
-static SDL_Window   *g_window   = NULL;
-static SDL_Renderer *g_renderer = NULL;
-static SDL_Texture  *g_texture  = NULL;
+static SDL_Window        *g_window     = NULL;
+static SDL_Renderer      *g_renderer   = NULL;
+static SDL_Texture       *g_texture    = NULL;
+static SDL_AudioDeviceID  g_audio_dev  = 0;
 
 /* debug level – read from LEANBOY_DEBUG once at init */
 static int g_debug = 0;
@@ -35,7 +36,7 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
     DBG(1, "init  scale=%d  window=%dx%d  debug=%d",
         SCALE, GB_W * SCALE, GB_H * SCALE, g_debug);
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         DBG(1, "SDL_Init failed: %s", SDL_GetError());
         return lean_io_result_mk_ok(lean_box(0xFFFFFFFF));
     }
@@ -61,6 +62,22 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
         SDL_DestroyRenderer(g_renderer); SDL_DestroyWindow(g_window); SDL_Quit();
         return lean_io_result_mk_ok(lean_box(0xFFFFFFFF));
     }
+    /* Open audio device: 44100 Hz, stereo, signed 16-bit, queue mode */
+    SDL_AudioSpec desired, obtained;
+    SDL_memset(&desired, 0, sizeof(desired));
+    desired.freq     = 44100;
+    desired.format   = AUDIO_S16SYS;
+    desired.channels = 2;
+    desired.samples  = 1024;
+    desired.callback = NULL;
+    g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &desired, &obtained, 0);
+    if (g_audio_dev == 0) {
+        DBG(1, "SDL_OpenAudioDevice failed: %s (audio disabled)", SDL_GetError());
+    } else {
+        SDL_PauseAudioDevice(g_audio_dev, 0);
+        DBG(1, "audio OK  freq=%d fmt=0x%x ch=%d",
+            obtained.freq, obtained.format, obtained.channels);
+    }
     DBG(1, "init OK");
     return lean_io_result_mk_ok(lean_box(0));
 }
@@ -68,10 +85,33 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
 /* lean_sdl_destroy : IO Unit */
 lean_obj_res lean_sdl_destroy(lean_obj_arg world) {
     DBG(1, "destroy");
-    if (g_texture)  { SDL_DestroyTexture(g_texture);   g_texture  = NULL; }
-    if (g_renderer) { SDL_DestroyRenderer(g_renderer); g_renderer = NULL; }
-    if (g_window)   { SDL_DestroyWindow(g_window);     g_window   = NULL; }
+    if (g_audio_dev) { SDL_CloseAudioDevice(g_audio_dev); g_audio_dev = 0; }
+    if (g_texture)   { SDL_DestroyTexture(g_texture);     g_texture   = NULL; }
+    if (g_renderer)  { SDL_DestroyRenderer(g_renderer);   g_renderer  = NULL; }
+    if (g_window)    { SDL_DestroyWindow(g_window);       g_window    = NULL; }
     SDL_Quit();
+    return lean_io_result_mk_ok(lean_box(0));
+}
+
+/* lean_sdl_audio_queue : ByteArray -> IO Unit */
+lean_obj_res lean_sdl_audio_queue(lean_obj_arg arr, lean_obj_arg world) {
+    if (g_audio_dev == 0) {
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    size_t size = lean_sarray_size(arr);
+    if (size == 0) {
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    const void *data = lean_sarray_cptr(arr);
+    /* Simple backpressure: if queue is already large, skip this batch */
+    uint32_t queued = SDL_GetQueuedAudioSize(g_audio_dev);
+    if (queued > 44100 * 2 * 2 * 4) {  /* > 4 frames buffered */
+        DBG(2, "audio_queue: skipping (queued=%u)", queued);
+        return lean_io_result_mk_ok(lean_box(0));
+    }
+    if (SDL_QueueAudio(g_audio_dev, data, (uint32_t)size) != 0) {
+        DBG(1, "SDL_QueueAudio failed: %s", SDL_GetError());
+    }
     return lean_io_result_mk_ok(lean_box(0));
 }
 

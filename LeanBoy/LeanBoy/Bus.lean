@@ -1,3 +1,4 @@
+import LeanBoy.Apu
 import LeanBoy.Cartridge.Cartridge
 import LeanBoy.Gpu.Gpu
 import LeanBoy.Ram
@@ -38,6 +39,7 @@ open Cartridge Gpu
 structure Bus where
   cartridge   : IO.Ref Cartridge
   gpu         : IO.Ref Gpu
+  apu         : IO.Ref Apu
   wram        : IO.Ref Ram         -- 0xC000–0xDFFF
   hram        : IO.Ref Ram         -- 0xFF80–0xFFFE
   timer       : IO.Ref Timer
@@ -52,6 +54,7 @@ def create (cart : Cartridge) (printSerial : Bool := false) : IO Bus := do
   return {
     cartridge  := ← IO.mkRef cart
     gpu        := ← IO.mkRef {}
+    apu        := ← IO.mkRef {}
     wram       := ← IO.mkRef (Ram.create 0xC000 0xDFFF)
     hram       := ← IO.mkRef (Ram.create 0xFF80 0xFFFE)
     timer      := ← IO.mkRef {}
@@ -95,6 +98,9 @@ def readByte (bus : Bus) (addr : UInt16) : IO UInt8 := do
   else if addr == 0xFF0F then
     let ic ← bus.interrupt.get
     return ic.readByte addr
+  else if addr >= 0xFF10 && addr < 0xFF40 then
+    let apu ← bus.apu.get
+    return apu.readByte addr   -- APU registers + Wave RAM
   else if addr < 0xFF80 then
     let gpu ← bus.gpu.get
     return gpu.readByte addr   -- GPU registers
@@ -138,6 +144,8 @@ def writeByte (bus : Bus) (addr : UInt16) (v : UInt8) : IO Unit := do
     bus.timer.modify (fun t => t.writeByte addr v)
   else if addr == 0xFF0F then
     bus.interrupt.modify (fun ic => ic.writeByte addr v)
+  else if addr >= 0xFF10 && addr < 0xFF40 then
+    bus.apu.modify (fun a => a.writeByte addr v)  -- APU registers + Wave RAM
   else if addr == 0xFF46 then
     dmaTransfer bus v
   else if addr < 0xFF80 then
