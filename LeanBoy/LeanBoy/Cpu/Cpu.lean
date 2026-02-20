@@ -239,14 +239,7 @@ def executeInstruction (cpu : Cpu) (decoded : DecodedInst) : IO (Nat × Cpu) := 
   -- ── Control ───────────────────────────────────────────────────────────────
   | .NOP  => return (cy, cpu)
   | .HALT => return (cy, { cpu with halted := true })
-  | .STOP => do
-    -- On CGB, STOP with KEY1 armed triggers CPU speed switch.
-    if cpu.bus.isCgb then
-      let armed ← cpu.bus.speedArmed.get
-      if armed then
-        cpu.bus.speedArmed.set false
-        cpu.bus.doubleSpeed.modify (fun b => !b)
-    return (cy, cpu)
+  | .STOP => return (cy, cpu)
   | .DI   => return (cy, { cpu with ime := false, imeNext := false })
   | .EI   => return (cy, { cpu with imeNext := true })
   -- ── 8-bit loads: register ↔ register ─────────────────────────────────────
