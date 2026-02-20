@@ -638,76 +638,12 @@ def runInstruction (cpuRef : IO.Ref Cpu) : IO Nat := do
     else cpu'
   -- Fetch & decode
   let decoded ← fetchAndDecode cpu''.bus cpu''.pc
-  -- Trap: detect first entry into the bitreverse data table region (0x0010-0x001F from outside).
-  if cpu''.pc >= 0x0010 && cpu''.pc < 0x0020 &&
-     !(cpu''.prevPc >= 0x0010 && cpu''.prevPc < 0x0020) then do
-    IO.eprintln s!"[ENTER_DATA] PC=0x{Debug.hexWord cpu''.pc}  from=0x{Debug.hexWord cpu''.prevPc}  prevPC2=0x{Debug.hexWord cpu''.prevPc2}  \
-SP=0x{Debug.hexWord cpu''.sp}  HL=0x{Debug.hexWord cpu''.registers.hl}  \
-BC=0x{Debug.hexWord cpu''.registers.bc}  DE=0x{Debug.hexWord cpu''.registers.de}  \
-AF=0x{Debug.hexWord cpu''.registers.af}"
-  -- Trap: catch when PC is 0x3c94 (F8 = LD HL SP+n byte, possible misaligned decode).
-  if cpu''.pc == 0x3c94 then do
-    IO.eprintln s!"[AT3C94] from=0x{Debug.hexWord cpu''.prevPc}  prevPC2=0x{Debug.hexWord cpu''.prevPc2}  \
-SP=0x{Debug.hexWord cpu''.sp}  BC=0x{Debug.hexWord cpu''.registers.bc}  \
-HL=0x{Debug.hexWord cpu''.registers.hl}  AF=0x{Debug.hexWord cpu''.registers.af}"
-  -- Trap: dump stack at RETI (0x007D) only when near crash point (SP >= 0xe440).
-  if cpu''.pc == 0x007D && cpu''.sp >= 0xe440 then do
-    let retAddr ← cpu''.bus.readWord cpu''.sp
-    let words ← (List.range 8).mapM (fun i => cpu''.bus.readWord (cpu''.sp + (2 * i).toUInt16))
-    let stackStr := String.intercalate " " (words.map (fun w => "0x" ++ Debug.hexWord w))
-    IO.eprintln s!"[RETI007D] SP=0x{Debug.hexWord cpu''.sp}  [SP]=0x{Debug.hexWord retAddr}  stack: {stackStr}"
-  -- Trap: detect first entry into the 0x3c80-0x3cbc region from outside.
-  if cpu''.pc >= 0x3c80 && cpu''.pc <= 0x3cbc &&
-     !(cpu''.prevPc >= 0x3c80 && cpu''.prevPc <= 0x3cbc) then do
-    let sp := cpu''.sp
-    let retAddr ← cpu''.bus.readWord sp
-    IO.eprintln s!"[ENTER3C80] PC=0x{Debug.hexWord cpu''.pc}  from=0x{Debug.hexWord cpu''.prevPc}  \
-SP=0x{Debug.hexWord sp}  [SP]=0x{Debug.hexWord retAddr}  \
-BC=0x{Debug.hexWord cpu''.registers.bc}  HL=0x{Debug.hexWord cpu''.registers.hl}  \
-AF=0x{Debug.hexWord cpu''.registers.af}"
-  -- Trap: log when PC enters 0x3cb6 (the copy loop) — reveal the return address on stack.
-  if cpu''.pc == 0x3cb6 then do
-    let sp := cpu''.sp
-    let retAddr ← cpu''.bus.readWord sp   -- what CALL/trampoline pushed as return address
-    IO.eprintln s!"[ENTER3CB6] from=0x{Debug.hexWord cpu''.prevPc}  SP=0x{Debug.hexWord sp}  \
-retAddr=[SP]=0x{Debug.hexWord retAddr}  \
-BC=0x{Debug.hexWord cpu''.registers.bc}  HL=0x{Debug.hexWord cpu''.registers.hl}"
-  -- Trap: log every RST 0x38 at level 1 with first occurrence getting a full stack dump.
-  if let .RST 0x38 := decoded.inst then do
-    let sp := cpu''.sp
-    IO.eprintln s!"[RST38] PC=0x{Debug.hexWord cpu''.pc}  prevPC=0x{Debug.hexWord cpu''.prevPc}  prevPC2=0x{Debug.hexWord cpu''.prevPc2}  \
-SP=0x{Debug.hexWord sp}  HL=0x{Debug.hexWord cpu''.registers.hl}  \
-BC=0x{Debug.hexWord cpu''.registers.bc}  DE=0x{Debug.hexWord cpu''.registers.de}  \
-AF=0x{Debug.hexWord cpu''.registers.af}"
-    -- On the FIRST RST38 (sp is far from 0xFFFE), dump the top 12 stack words to trace the call chain.
-    if sp < 0xFF00 then do
-      let words ← (List.range 12).mapM (fun i => cpu''.bus.readWord (sp + (2 * i).toUInt16))
-      IO.eprintln s!"[RST38] Stack@SP: {words.map (fun w => "0x" ++ Debug.hexWord w)}"
-      let d ← (List.range 32).mapM (fun i => cpu''.bus.readByte (0xC4DA + i).toUInt16)
-      IO.eprintln s!"[RST38] DispTbl@0xC4DA: {Debug.hexDump (ByteArray.mk d.toArray) 0 32}"
   -- Advance PC past this instruction; record prevPc for diagnostics
   let cpu''' := { cpu'' with pc := cpu''.pc + decoded.length.toUInt16
                            , prevPc  := cpu''.pc
                            , prevPc2 := cpu''.prevPc }
   -- Execute
   let (cycles, cpu4) ← executeInstruction cpu''' decoded
-  -- Trap: dump stack at dispatch loop exit (0x0079) when near crash point.
-  if cpu''.pc == 0x0079 && cpu''.sp >= 0xe43c then do
-    let words ← (List.range 8).mapM (fun i => cpu''.bus.readWord (cpu''.sp + (2 * i).toUInt16))
-    let stackStr := String.intercalate " " (words.map (fun w => "0x" ++ Debug.hexWord w))
-    IO.eprintln s!"[EXIT_DISPATCH] SP=0x{Debug.hexWord cpu''.sp}  stack: {stackStr}"
-  -- Trap: catch ODD SP transitions near crash range (SP even→odd means +1/-1 SP change).
-  -- Only watch once SP is near the crash range (>= 0xe430).
-  if cpu''.sp >= 0xe430 && cpu4.sp % 2 == 1 && cpu''.sp % 2 == 0 then do
-    let words ← (List.range 8).mapM (fun i => cpu4.bus.readWord (cpu4.sp + (2 * i).toUInt16))
-    let stackStr := String.intercalate " " (words.map (fun w => "0x" ++ Debug.hexWord w))
-    IO.eprintln s!"[ODD_SP] at PC=0x{Debug.hexWord cpu''.pc}  prevPC=0x{Debug.hexWord cpu''.prevPc}  op={reprStr decoded.inst}  \
-SP=0x{Debug.hexWord cpu''.sp}→0x{Debug.hexWord cpu4.sp}  stack: {stackStr}"
-  -- Trap: catch the instruction that makes PC become 0x3c94 (suspicious mid-instr address).
-  if cpu4.pc == 0x3c94 then do
-    IO.eprintln s!"[PRODUCE3C94] instr at 0x{Debug.hexWord cpu''.pc}  op={reprStr decoded.inst}  \
-cpu4.pc=0x{Debug.hexWord cpu4.pc}  SP=0x{Debug.hexWord cpu4.sp}  \
-BC=0x{Debug.hexWord cpu4.registers.bc}  HL=0x{Debug.hexWord cpu4.registers.hl}"
   cpuRef.set cpu4
   Debug.log3 s!"[CPU] pc=0x{Debug.hexWord cpu''.pc}  op={reprStr decoded.inst}  \
 cy={cycles}  AF={Debug.hexWord cpu4.registers.af}  \

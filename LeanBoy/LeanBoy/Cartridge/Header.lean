@@ -16,6 +16,14 @@ inductive CartridgeType
   | Mbc3
   | Mbc3Ram
   | Mbc3RamBattery
+  | Mbc3TimerBattery     -- 0x0F: MBC3+TIMER+BATTERY       (RTC stub)
+  | Mbc3TimerRamBattery  -- 0x10: MBC3+TIMER+RAM+BATTERY   (Pokémon G/S/C)
+  | Mbc5
+  | Mbc5Ram
+  | Mbc5RamBattery
+  | Mbc5Rumble
+  | Mbc5RumbleRam
+  | Mbc5RumbleRamBattery
   deriving Repr, BEq
 
 namespace CartridgeType
@@ -28,9 +36,17 @@ def ofByte (b : UInt8) : Option CartridgeType :=
   | 0x03 => some .Mbc1RamBattery
   | 0x05 => some .Mbc2
   | 0x06 => some .Mbc2Battery
+  | 0x0F => some .Mbc3TimerBattery
+  | 0x10 => some .Mbc3TimerRamBattery
   | 0x11 => some .Mbc3
   | 0x12 => some .Mbc3Ram
   | 0x13 => some .Mbc3RamBattery
+  | 0x19 => some .Mbc5
+  | 0x1A => some .Mbc5Ram
+  | 0x1B => some .Mbc5RamBattery
+  | 0x1C => some .Mbc5Rumble
+  | 0x1D => some .Mbc5RumbleRam
+  | 0x1E => some .Mbc5RumbleRamBattery
   | _    => none
 
 end CartridgeType
@@ -59,7 +75,7 @@ def parse (rom : ByteArray) : Except String CartridgeHeader := do
   let romByte   := rom.get! 0x148
   let ramByte   := rom.get! 0x149
   match CartridgeType.ofByte typeByte with
-  | none    => throw s!"Unknown cartridge type: 0x{Nat.toDigits 16 typeByte.toNat |>.asString}"
+  | none    => throw s!"Unknown cartridge type: 0x{(Nat.toDigits 16 typeByte.toNat).foldl String.push ""}"
   | some ct => return { cartridgeType := ct
                         romBanks      := romBankCount romByte
                         ramBanks      := ramBankCount ramByte }

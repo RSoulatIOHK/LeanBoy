@@ -46,9 +46,10 @@ private def resolveDebugLevel (args : List String) : IO Nat := do
 -- ─── Main ────────────────────────────────────────────────────────────────────
 
 def main (args : List String) : IO Unit := do
-  -- Separate ROM path from --debug flags
+  -- Separate ROM path from --debug/--uncap flags
+  let uncapped := args.contains "--uncap"
   let romArgs := args.filter (fun s =>
-    let isDebugFlag := s == "--debug"
+    let isDebugFlag := s == "--debug" || s == "--uncap"
     let isNumber    := s.toNat?.isSome
     !isDebugFlag && !isNumber)
   match romArgs with
@@ -144,10 +145,11 @@ LY={gpu.lcdPosition.ly} STAT=0x{hexByte gpu.lcdStat.value}"
                 if dbgLevel >= 1 && totalFrames % 60 == 0 then
                   IO.eprintln s!"[EMU] {totalFrames} frames rendered"
                 -- Frame limiter: sleep out the remainder of the 16.67ms budget
-                let frameEnd ← IO.monoNanosNow
-                let elapsed := frameEnd - frameStart
-                if elapsed < frameNs then
-                  IO.sleep ((frameNs - elapsed) / 1_000_000).toUInt32
+                if !uncapped then
+                  let frameEnd ← IO.monoNanosNow
+                  let elapsed := frameEnd - frameStart
+                  if elapsed < frameNs then
+                    IO.sleep ((frameNs - elapsed) / 1_000_000).toUInt32
         catch e =>
           IO.eprintln s!"[CRASH] after {totalFrames} frames: {e}"
           let gpu ← emu.bus.gpu.get

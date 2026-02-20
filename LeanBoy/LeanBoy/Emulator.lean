@@ -24,9 +24,18 @@ namespace Emulator
 
 -- Load a ROM from bytes and initialize all hardware to post-boot state.
 def create (romBytes : ByteArray) (printSerial : Bool := false) : IO Emulator := do
-  let cart ← IO.ofExcept (Cartridge.detect romBytes)
-  let bus  ← Bus.create cart printSerial
-  let cpu  := { bus }
+  let cart  ← IO.ofExcept (Cartridge.detect romBytes)
+  let isCgb := romBytes.size > 0x143 && (romBytes.get! 0x143 &&& 0x80) != 0
+  let bus   ← Bus.create cart isCgb printSerial
+  -- Post-boot ROM register state varies by hardware:
+  --   DMG: A=0x01, F=0xB0, BC=0x0013, DE=0x00D8, HL=0x014D
+  --   CGB: A=0x11, F=0x80, BC=0x0000, DE=0xFF56, HL=0x000D
+  -- Games check A=0x11 to activate CGB code paths (palette setup, VRAM banking, etc.)
+  let initRegs : Registers :=
+    if isCgb then { a := 0x11, f := 0x80, b := 0x00, c := 0x00
+                  , d := 0xFF, e := 0x56, h := 0x00, l := 0x0D }
+    else          {}   -- DMG defaults from Registers struct
+  let cpu     := { bus, registers := initRegs }
   let cpuRef  ← IO.mkRef cpu
   let frameNo ← IO.mkRef 0
   -- Dump initial LCD state so we have a baseline even before frame 1.
@@ -41,21 +50,25 @@ LCDC=0x{hexByte gpu.lcdControl.value}  BGP=0x{hexByte gpu.palettes.bgp.value}"
 def step (emu : Emulator) : IO (Option (FrameBuffer × ByteArray)) := do
   let cycles ← Cpu.Cpu.runInstruction emu.cpuRef
   -- runInstruction returns M-cycles; GPU and Timer thresholds are in T-cycles.
-  -- 1 M-cycle = 4 T-cycles on the Game Boy.
-  let tCycles := cycles * 4
+  -- Normal: 1 M-cycle = 4 T-cycles. CGB double-speed: CPU runs 2×, GPU/Timer still at 1×.
+  let ds      ← emu.bus.doubleSpeed.get
+  let tCycles := if ds then cycles * 2 else cycles * 4
   -- Tick timer
   let ic ← emu.bus.interrupt.get
   let t  ← emu.bus.timer.get
   let (t', ic') := t.tick ic tCycles
   emu.bus.timer.set t'
-  emu.bus.interrupt.set ic'
-  -- Tick GPU
-  let gpu ← emu.bus.gpu.get
-  let fn  ← emu.frameNo.get
+  -- Tick GPU (pass ic' directly; write final IC once after both ticks)
+  let gpu      ← emu.bus.gpu.get
+  let prevMode := gpu.mode
+  let fn       ← emu.frameNo.get
   let (gpu', ic'', result, dbgIO) := gpu.tick ic' tCycles fn
   emu.bus.gpu.set gpu'
   emu.bus.interrupt.set ic''
   dbgIO   -- execute any debug IO from the GPU tick
+  -- HDMA: copy one 16-byte block whenever the GPU enters HBlank
+  if prevMode != .HBlank && gpu'.mode == .HBlank then
+    Bus.hdmaStep emu.bus
   -- Tick APU
   emu.bus.apu.modify (fun a => a.tick tCycles.toUInt32)
   match result with

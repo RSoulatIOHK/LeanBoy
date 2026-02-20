@@ -26,10 +26,12 @@ structure OamEntry where
 
 namespace OamEntry
 
-@[inline] def priority (e : OamEntry) : Bool := testBit e.flags 7
-@[inline] def yFlip    (e : OamEntry) : Bool := testBit e.flags 6
-@[inline] def xFlip    (e : OamEntry) : Bool := testBit e.flags 5
-@[inline] def palette  (e : OamEntry) : Bool := testBit e.flags 4  -- false=OBP0, true=OBP1
+@[inline] def priority        (e : OamEntry) : Bool := testBit e.flags 7
+@[inline] def yFlip           (e : OamEntry) : Bool := testBit e.flags 6
+@[inline] def xFlip           (e : OamEntry) : Bool := testBit e.flags 5
+@[inline] def palette         (e : OamEntry) : Bool := testBit e.flags 4  -- DMG: false=OBP0, true=OBP1
+@[inline] def cgbVramBank     (e : OamEntry) : Nat  := if testBit e.flags 3 then 1 else 0
+@[inline] def cgbPaletteIndex (e : OamEntry) : Nat  := (e.flags &&& 0x07).toNat
 
 -- Screen Y of the sprite top pixel.
 @[inline] def screenY (e : OamEntry) : Int := Int.ofNat e.y.toNat - 16
@@ -53,7 +55,7 @@ def writeByte (oam : OamTable) (addr : UInt16) (v : UInt8) : OamTable :=
   if offset < 160 then { oam with data := oam.data.set! offset v } else oam
 
 -- Get the nth sprite entry (0–39).
-def getEntry (oam : OamTable) (n : Nat) : OamEntry :=
+@[inline] def getEntry (oam : OamTable) (n : Nat) : OamEntry :=
   let base := n * 4
   { y       := oam.data.get! base
     x       := oam.data.get! (base + 1)
@@ -64,8 +66,10 @@ def getEntry (oam : OamTable) (n : Nat) : OamEntry :=
 def dmaLoad (oam : OamTable) (src : ByteArray) (srcBase : Nat) : OamTable :=
   let newData := Id.run do
     let mut d := oam.data
-    for i in List.range 160 do
+    let mut i := 0
+    while i < 160 do
       d := d.set! i (src.get! (srcBase + i))
+      i := i + 1
     return d
   { oam with data := newData }
 

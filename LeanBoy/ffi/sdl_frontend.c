@@ -49,7 +49,7 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
         return lean_io_result_mk_ok(lean_box(0xFFFFFFFF));
     }
     g_renderer = SDL_CreateRenderer(g_window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_RENDERER_ACCELERATED);
     if (!g_renderer) {
         DBG(1, "SDL_CreateRenderer failed: %s", SDL_GetError());
         SDL_DestroyWindow(g_window); SDL_Quit();
@@ -115,7 +115,8 @@ lean_obj_res lean_sdl_audio_queue(lean_obj_arg arr, lean_obj_arg world) {
     return lean_io_result_mk_ok(lean_box(0));
 }
 
-/* lean_sdl_present_frame : ByteArray -> IO Unit */
+/* lean_sdl_present_frame : ByteArray -> IO Unit
+ * Expects a flat RGB24 buffer: GB_W * GB_H * 3 bytes, row-major [R,G,B,...]. */
 lean_obj_res lean_sdl_present_frame(lean_obj_arg arr, lean_obj_arg world) {
     static uint64_t s_frame_count = 0;
     size_t size = lean_sarray_size(arr);
@@ -125,35 +126,29 @@ lean_obj_res lean_sdl_present_frame(lean_obj_arg arr, lean_obj_arg world) {
         DBG(1, "present_frame: no texture");
         return lean_io_result_mk_ok(lean_box(0));
     }
-    if (size < (size_t)(GB_W * GB_H)) {
+    if (size < (size_t)(GB_W * GB_H * 3)) {
         fprintf(stderr, "[SDL] present_frame: buffer too small! got=%zu expected=%d\n",
-                size, GB_W * GB_H);
+                size, GB_W * GB_H * 3);
         return lean_io_result_mk_ok(lean_box(0));
     }
 
     s_frame_count++;
 
-    /* At level 2: sample some pixel values for visual diagnostics */
+    /* At level 2: sample R channel of some pixels for visual diagnostics */
     if (g_debug >= 2) {
         fprintf(stderr,
-            "[SDL] frame %llu  px(0,0)=%u px(0,80)=%u px(72,0)=%u px(72,80)=%u\n",
+            "[SDL] frame %llu  px(0,0)=(%u,%u,%u) px(72,80)=(%u,%u,%u)\n",
             (unsigned long long)s_frame_count,
-            pixels[0],
-            pixels[80],
-            pixels[72 * GB_W],
-            pixels[72 * GB_W + 80]);
+            pixels[0], pixels[1], pixels[2],
+            pixels[(72 * GB_W + 80) * 3],
+            pixels[(72 * GB_W + 80) * 3 + 1],
+            pixels[(72 * GB_W + 80) * 3 + 2]);
     } else if (g_debug >= 1 && s_frame_count % 60 == 0) {
         fprintf(stderr, "[SDL] frame %llu presented\n",
                 (unsigned long long)s_frame_count);
     }
 
-    /* Convert grayscale to RGB24 */
-    uint8_t rgb[GB_W * GB_H * 3];
-    for (int i = 0; i < GB_W * GB_H; i++) {
-        uint8_t g = pixels[i];
-        rgb[i*3+0] = g; rgb[i*3+1] = g; rgb[i*3+2] = g;
-    }
-    SDL_UpdateTexture(g_texture, NULL, rgb, GB_W * 3);
+    SDL_UpdateTexture(g_texture, NULL, pixels, GB_W * 3);
     SDL_RenderClear(g_renderer);
     SDL_RenderCopy(g_renderer, g_texture, NULL, NULL);
     SDL_RenderPresent(g_renderer);
