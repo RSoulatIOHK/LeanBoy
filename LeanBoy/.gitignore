@@ -1,1 +1,24 @@
-/.lake
+# Lake build artifacts
+.lake/build/
+.lake/lakefile.olean
+.lake/lakefile.olean.lock
+.lake/lakefile.olean.trace
+
+# Lake package cache (keep packages/ for reproducibility, but ignore build outputs inside)
+.lake/packages/*/.lake/
+
+# Compiled Lean objects (generated alongside source files)
+**/*.olean
+**/*.olean.trace
+**/*.ilean
+**/*.c
+**/*.o
+
+# Exception: keep ffi C source (hand-written, not generated)
+!ffi/sdl_frontend.c
+
+# Save files (battery-backed RAM)
+*.sav
+
+# macOS
+.DS_Store
