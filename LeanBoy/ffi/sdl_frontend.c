@@ -49,7 +49,7 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
         return lean_io_result_mk_ok(lean_box(0xFFFFFFFF));
     }
     g_renderer = SDL_CreateRenderer(g_window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_RENDERER_ACCELERATED);
     if (!g_renderer) {
         DBG(1, "SDL_CreateRenderer failed: %s", SDL_GetError());
         SDL_DestroyWindow(g_window); SDL_Quit();

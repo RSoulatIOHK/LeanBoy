@@ -42,26 +42,35 @@ private def timaClockBit (tac : UInt8) : Nat :=
 -- Whether the timer is enabled (TAC bit 2).
 @[inline] private def enabled (tac : UInt8) : Bool := testBit tac 2
 
--- Advance the timer by `cycles` m-cycles; may request a Timer interrupt.
+-- Advance the timer by `cycles` T-cycles; may request a Timer interrupt.
+-- Closed-form: counts falling edges of the clock bit without a per-cycle loop.
+-- Falling edges of bit N in [old, old+cycles) = (new >> (N+1)) - (old >> (N+1)),
+-- where arithmetic is over Nat so UInt16 wraparound is handled correctly.
 def tick (t : Timer) (ic : InterruptController) (cycles : Nat) :
-    Timer × InterruptController := Id.run do
-  let mut timer := t
-  let mut ic    := ic
-  for _ in List.range cycles do
-    let prevInternal := timer.internal
-    timer := { timer with internal := timer.internal + 1 }
-    -- TIMA increments when the selected bit of `internal` falls (AND with enable)
-    let bit := timaClockBit timer.tac
-    let wasSet := testBit16 prevInternal bit
-    let nowSet := testBit16 timer.internal bit
-    if enabled timer.tac && wasSet && !nowSet then
-      if timer.tima == 0xFF then
-        -- Overflow: reload from TMA and request interrupt
-        timer := { timer with tima := timer.tma }
-        ic    := ic.request .Timer
+    Timer × InterruptController :=
+  let oldNat      := t.internal.toNat
+  let newNat      := oldNat + cycles
+  let newInternal := newNat.toUInt16   -- wraps mod 65536 like hardware
+  let bit         := timaClockBit t.tac
+  let timaEdges   :=
+    if enabled t.tac
+    then (newNat >>> (bit + 1)) - (oldNat >>> (bit + 1))
+    else 0
+  if timaEdges == 0 then
+    ({ t with internal := newInternal }, ic)
+  else Id.run do
+    -- Apply TIMA ticks; at most 1–2 iterations in practice.
+    let mut tima := t.tima
+    let mut ic   := ic
+    let mut rem  := timaEdges
+    while rem > 0 do
+      if tima == 0xFF then
+        tima := t.tma
+        ic   := ic.request .Timer
       else
-        timer := { timer with tima := timer.tima + 1 }
-  return (timer, ic)
+        tima := tima + 1
+      rem := rem - 1
+    return ({ t with internal := newInternal, tima }, ic)
 
 -- Read a byte from the timer's address space.
 def readByte (t : Timer) (addr : UInt16) : UInt8 :=

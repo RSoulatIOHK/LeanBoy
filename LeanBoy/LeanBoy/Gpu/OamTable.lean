@@ -55,7 +55,7 @@ def writeByte (oam : OamTable) (addr : UInt16) (v : UInt8) : OamTable :=
   if offset < 160 then { oam with data := oam.data.set! offset v } else oam
 
 -- Get the nth sprite entry (0–39).
-def getEntry (oam : OamTable) (n : Nat) : OamEntry :=
+@[inline] def getEntry (oam : OamTable) (n : Nat) : OamEntry :=
   let base := n * 4
   { y       := oam.data.get! base
     x       := oam.data.get! (base + 1)
@@ -66,8 +66,10 @@ def getEntry (oam : OamTable) (n : Nat) : OamEntry :=
 def dmaLoad (oam : OamTable) (src : ByteArray) (srcBase : Nat) : OamTable :=
   let newData := Id.run do
     let mut d := oam.data
-    for i in List.range 160 do
+    let mut i := 0
+    while i < 160 do
       d := d.set! i (src.get! (srcBase + i))
+      i := i + 1
     return d
   { oam with data := newData }
 

@@ -75,20 +75,22 @@ def trigger (ch : SquareChannel) (withSweep : Bool) : SquareChannel :=
 
 def clockFreq (ch : SquareChannel) (tCycles : UInt32) : SquareChannel :=
   if !ch.enabled then ch
-  else Id.run do
-    let mut c := ch
-    let mut rem := tCycles
-    while rem > 0 do
-      let step := min rem c.freqTimer.toUInt32
-      rem := rem - step
-      let t := c.freqTimer - step.toUInt16
-      if t == 0 then
-        c := { c with freqTimer := c.freqPeriod
-                      dutyPos   := (c.dutyPos + 1) % 8 }
+  else
+    -- Closed-form: avoid per-iteration struct allocation.
+    let timer := ch.freqTimer.toUInt32
+    if tCycles < timer then
+      { ch with freqTimer := (timer - tCycles).toUInt16 }
+    else
+      let period := ch.freqPeriod.toUInt32
+      if period == 0 then ch  -- safety guard (shouldn't occur on real hardware)
       else
-        c := { c with freqTimer := t }
-        rem := 0
-    return c
+        let rem0 := tCycles - timer
+        let k    := rem0 / period
+        let rem1 := rem0 % period
+        -- If rem1 = 0 the last expiry consumed exactly to zero, so reload to period.
+        let newTimer : UInt16 := if rem1 == 0 then period.toUInt16 else (period - rem1).toUInt16
+        let newPos := ((ch.dutyPos.toUInt32 + k + 1) % 8).toUInt8
+        { ch with freqTimer := newTimer, dutyPos := newPos }
 
 def clockLength (ch : SquareChannel) : SquareChannel :=
   if ch.lengthEnabled && ch.lengthCounter > 0 then
@@ -178,20 +180,20 @@ def trigger (ch : WaveChannel) : WaveChannel :=
 
 def clockFreq (ch : WaveChannel) (tCycles : UInt32) : WaveChannel :=
   if !ch.enabled then ch
-  else Id.run do
-    let mut c := ch
-    let mut rem := tCycles
-    while rem > 0 do
-      let step := min rem c.freqTimer.toUInt32
-      rem := rem - step
-      let t := c.freqTimer - step.toUInt16
-      if t == 0 then
-        c := { c with freqTimer := c.freqPeriod
-                      wavePos   := (c.wavePos + 1) % 32 }
+  else
+    let timer := ch.freqTimer.toUInt32
+    if tCycles < timer then
+      { ch with freqTimer := (timer - tCycles).toUInt16 }
+    else
+      let period := ch.freqPeriod.toUInt32
+      if period == 0 then ch
       else
-        c := { c with freqTimer := t }
-        rem := 0
-    return c
+        let rem0 := tCycles - timer
+        let k    := rem0 / period
+        let rem1 := rem0 % period
+        let newTimer : UInt16 := if rem1 == 0 then period.toUInt16 else (period - rem1).toUInt16
+        let newPos := ((ch.wavePos.toUInt32 + k + 1) % 32).toUInt8
+        { ch with freqTimer := newTimer, wavePos := newPos }
 
 def clockLength (ch : WaveChannel) : WaveChannel :=
   if ch.lengthEnabled && ch.lengthCounter > 0 then
@@ -255,20 +257,30 @@ private def stepLfsr (lfsr : UInt16) (wide : Bool) : UInt16 :=
 
 def clockFreq (ch : NoiseChannel) (tCycles : UInt32) : NoiseChannel :=
   if !ch.enabled then ch
-  else Id.run do
-    let mut c := ch
-    let mut rem := tCycles
-    while rem > 0 do
-      let step := min rem c.freqTimer.toUInt32
-      rem := rem - step
-      let t := c.freqTimer - step.toUInt16
-      if t == 0 then
-        c := { c with freqTimer := c.freqPeriod
-                      lfsr      := stepLfsr c.lfsr c.wideMode }
+  else
+    -- Closed-form timer expiry count; only the LFSR needs a sequential loop
+    -- (each LFSR step depends on the previous), everything else is arithmetic.
+    let timer := ch.freqTimer.toUInt32
+    if tCycles < timer then
+      { ch with freqTimer := (timer - tCycles).toUInt16 }
+    else
+      let period := ch.freqPeriod.toUInt32
+      if period == 0 then ch
       else
-        c := { c with freqTimer := t }
-        rem := 0
-    return c
+        let rem0     := tCycles - timer
+        let k        := rem0 / period
+        let rem1     := rem0 % period
+        let newTimer : UInt16 := if rem1 == 0 then period.toUInt16 else (period - rem1).toUInt16
+        -- Step LFSR (k+1) times. Only lfsr (UInt16) is mutable — no struct alloc per step.
+        let wide := ch.wideMode
+        let lfsr := Id.run do
+          let mut lfsr := ch.lfsr
+          let mut i    := k + 1
+          while i > 0 do
+            lfsr := stepLfsr lfsr wide
+            i    := i - 1
+          return lfsr
+        { ch with freqTimer := newTimer, lfsr }
 
 def clockLength (ch : NoiseChannel) : NoiseChannel :=
   if ch.lengthEnabled && ch.lengthCounter > 0 then
@@ -311,20 +323,17 @@ structure Apu where
   samples        : ByteArray    := ByteArray.mk (Array.replicate 3200 0)
   sampleCount    : UInt32       := 0
   -- High-pass filter state (capacitor simulation, one per stereo channel).
-  capLeft        : Float        := 0.0
-  capRight       : Float        := 0.0
+  -- Stored as plain Int in the same ±32767 scale as raw samples (no floats needed).
+  capLeft        : Int          := 0
+  capRight       : Int          := 0
 
 namespace Apu
 
--- Write a Float in -32768..32767 as S16LE at byte offset `off` in `buf`.
-private def writeS16f (buf : ByteArray) (off : Nat) (v : Float) : ByteArray :=
-  let bits : UInt16 :=
-    if v >= 0.0 then v.toUInt16
-    else (65536.0 + v).toUInt16
+-- Encode an S16LE sample (v : Int in [-32768, 32767]) as two bytes in `buf` at `off`.
+-- Two's complement trick: (65536 + v).toNat.toUInt16 wraps correctly for both signs.
+private def writeS16i (buf : ByteArray) (off : Nat) (v : Int) : ByteArray :=
+  let bits : UInt16 := ((65536 + v).toNat).toUInt16
   (buf.set! off bits.toUInt8).set! (off + 1) (bits >>> 8).toUInt8
-
--- alpha ≈ 0.998 → HPF cutoff ~14 Hz at 44100 Hz (matches GB analog capacitor)
-private def hpfAlpha : Float := 0.998
 
 private def emitSample (apu : Apu) : Apu :=
   let c1 := apu.ch1.output.toNat
@@ -333,26 +342,29 @@ private def emitSample (apu : Apu) : Apu :=
   let c4 := apu.ch4.output.toNat
   let lp := apu.panLeft
   let rp := apu.panRight
-  let sumL :=
+  let sumL : Nat :=
     (if lp &&& 1 != 0 then c1 else 0) +
     (if lp &&& 2 != 0 then c2 else 0) +
     (if lp &&& 4 != 0 then c3 else 0) +
     (if lp &&& 8 != 0 then c4 else 0)
-  let sumR :=
+  let sumR : Nat :=
     (if rp &&& 1 != 0 then c1 else 0) +
     (if rp &&& 2 != 0 then c2 else 0) +
     (if rp &&& 4 != 0 then c3 else 0) +
     (if rp &&& 8 != 0 then c4 else 0)
-  -- Scale to ±32767 range as Float before HPF
-  let rawL := Float.ofNat ((sumL * (apu.masterVolLeft.toNat + 1) * 32767) / (60 * 8))
-  let rawR := Float.ofNat ((sumR * (apu.masterVolRight.toNat + 1) * 32767) / (60 * 8))
-  -- First-order HPF: cap tracks the DC/LF component; output = raw - cap
-  let capL' := hpfAlpha * apu.capLeft  + (1.0 - hpfAlpha) * rawL
-  let capR' := hpfAlpha * apu.capRight + (1.0 - hpfAlpha) * rawR
-  let outL  := max (-32768.0) (min 32767.0 (rawL - capL'))
-  let outR  := max (-32768.0) (min 32767.0 (rawR - capR'))
+  -- Scale to [0, 32767] (integer; max sumL=60, masterVol+1≤8, product ≤ 15.7M, fits Int)
+  let rawL : Int := Int.ofNat (sumL * (apu.masterVolLeft.toNat  + 1) * 32767 / (60 * 8))
+  let rawR : Int := Int.ofNat (sumR * (apu.masterVolRight.toNat + 1) * 32767 / (60 * 8))
+  -- First-order HPF: α ≈ 0.998 → cap' = (cap*998 + raw*2) / 1000
+  -- All values in [-32767, 32767]; max intermediate = 32767*998 ≈ 32.7M — fits Int without GMP.
+  let capL' := (apu.capLeft  * 998 + rawL * 2) / 1000
+  let capR' := (apu.capRight * 998 + rawR * 2) / 1000
+  let vL    := rawL - capL'
+  let vR    := rawR - capR'
+  let outL  : Int := if vL < -32768 then -32768 else if vL > 32767 then 32767 else vL
+  let outR  : Int := if vR < -32768 then -32768 else if vR > 32767 then 32767 else vR
   let off := apu.sampleCount.toNat * 4
-  let buf := writeS16f (writeS16f apu.samples off outL) (off + 2) outR
+  let buf := writeS16i (writeS16i apu.samples off outL) (off + 2) outR
   { apu with
     capLeft     := capL'
     capRight    := capR'
@@ -406,9 +418,11 @@ def tick (apu : Apu) (tCycles : UInt32) : Apu :=
     let newFst := a.frameSeqTimer + tCycles
     let steps  := newFst / 8192
     let mut step := a.frameSeqStep
-    for _ in List.range steps.toNat do
+    let mut iSteps := steps
+    while iSteps > 0 do
       a := frameSeqClock a step
       step := (step + 1) % 8
+      iSteps := iSteps - 1
     a := { a with frameSeqTimer := newFst % 8192, frameSeqStep := step }
     a := { a with
       ch1 := a.ch1.clockFreq tCycles

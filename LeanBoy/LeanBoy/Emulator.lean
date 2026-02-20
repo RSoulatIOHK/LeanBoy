@@ -50,21 +50,25 @@ LCDC=0x{hexByte gpu.lcdControl.value}  BGP=0x{hexByte gpu.palettes.bgp.value}"
 def step (emu : Emulator) : IO (Option (FrameBuffer × ByteArray)) := do
   let cycles ← Cpu.Cpu.runInstruction emu.cpuRef
   -- runInstruction returns M-cycles; GPU and Timer thresholds are in T-cycles.
-  -- 1 M-cycle = 4 T-cycles on the Game Boy.
-  let tCycles := cycles * 4
+  -- Normal: 1 M-cycle = 4 T-cycles. CGB double-speed: CPU runs 2×, GPU/Timer still at 1×.
+  let ds      ← emu.bus.doubleSpeed.get
+  let tCycles := if ds then cycles * 2 else cycles * 4
   -- Tick timer
   let ic ← emu.bus.interrupt.get
   let t  ← emu.bus.timer.get
   let (t', ic') := t.tick ic tCycles
   emu.bus.timer.set t'
-  emu.bus.interrupt.set ic'
-  -- Tick GPU
-  let gpu ← emu.bus.gpu.get
-  let fn  ← emu.frameNo.get
+  -- Tick GPU (pass ic' directly; write final IC once after both ticks)
+  let gpu      ← emu.bus.gpu.get
+  let prevMode := gpu.mode
+  let fn       ← emu.frameNo.get
   let (gpu', ic'', result, dbgIO) := gpu.tick ic' tCycles fn
   emu.bus.gpu.set gpu'
   emu.bus.interrupt.set ic''
   dbgIO   -- execute any debug IO from the GPU tick
+  -- HDMA: copy one 16-byte block whenever the GPU enters HBlank
+  if prevMode != .HBlank && gpu'.mode == .HBlank then
+    Bus.hdmaStep emu.bus
   -- Tick APU
   emu.bus.apu.modify (fun a => a.tick tCycles.toUInt32)
   match result with

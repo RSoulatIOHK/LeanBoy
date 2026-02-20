@@ -224,100 +224,163 @@ private def getTileMapIndex (tm : TileMap) (useArea1 : Bool) (x y : Nat) : UInt8
   tm.data.get! (mapBase + (y / 8) * 32 + (x / 8))
 
 -- Render background for scanline ly into fb.
+-- Uses a per-tile cache: lo/hi tile bytes are loaded once per 8 pixels instead
+-- of on every pixel, reducing ByteArray reads from 3/pixel to ~0.4/pixel.
 private def renderBgLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBuffer :=
-  let lc      := gpu.lcdControl
-  let lp      := gpu.lcdPosition
-  let scy     := lp.scy.toNat
-  let scx     := lp.scx.toNat
-  let bgY     := (scy + ly) % 256
+  let lc        := gpu.lcdControl
+  let lp        := gpu.lcdPosition
+  let scy       := lp.scy.toNat
+  let scx       := lp.scx.toNat
+  let bgY       := (scy + ly) % 256
   let tileArea  := lc.tileDataArea
   let bgMapArea := lc.bgTileMapArea
+  let bgTileRow := bgY % 8
+  let mapRowOff := (bgY / 8) * 32 + (if bgMapArea then 1024 else 0)
   let row := fb[ly]!
   let row' := Id.run do
-    let mut r := row
-    for lx in List.range 160 do
-      let bgX     := (scx + lx) % 256
-      let tileIdx  := getTileMapIndex gpu.tileMap bgMapArea bgX bgY
-      let attr     := if gpu.cgbMode then getTileMapIndex gpu.tileAttr bgMapArea bgX bgY else 0
-      -- CGB tile attributes: bit6=yFlip, bit5=xFlip, bit3=vramBank, bits2-0=palette
-      let yFlip    := gpu.cgbMode && (attr &&& 0x40) != 0
-      let xFlip    := gpu.cgbMode && (attr &&& 0x20) != 0
-      let useBank1 := gpu.cgbMode && (attr &&& 0x08) != 0
-      let palIdx   := (attr &&& 0x07).toNat
-      let tileRow  := if yFlip then 7 - bgY % 8 else bgY % 8
-      let tileCol  := if xFlip then 7 - bgX % 8 else bgX % 8
-      let td       := if useBank1 then gpu.tileData1 else gpu.tileData
-      let pixel    := getTilePixel td tileArea tileIdx tileRow tileCol
-      let color    :=
+    let mut r          := row
+    let mut lx         := 0
+    let mut cacheTileX : Nat   := 9999   -- sentinel: force reload on first pixel
+    let mut cacheLo    : UInt8 := 0
+    let mut cacheHi    : UInt8 := 0
+    let mut cachePal   : Nat   := 0
+    let mut cacheXFlip : Bool  := false
+    while lx < screenWidth do
+      let bgX   := (scx + lx) % 256
+      let tileX := bgX / 8
+      if tileX != cacheTileX then
+        cacheTileX := tileX
+        let tileIdx := gpu.tileMap.data.get! (mapRowOff + tileX)
+        let (tr, xFlip, useBank1, palIdx) :=
+          if gpu.cgbMode then
+            let a   := gpu.tileAttr.data.get! (mapRowOff + tileX)
+            let yf  := (a &&& 0x40) != 0
+            let xf  := (a &&& 0x20) != 0
+            let bnk := (a &&& 0x08) != 0
+            let pal := (a &&& 0x07).toNat
+            (if yf then 7 - bgTileRow else bgTileRow, xf, bnk, pal)
+          else (bgTileRow, false, false, 0)
+        let index : Nat :=
+          if tileArea then tileIdx.toNat
+          else if tileIdx < 128 then tileIdx.toNat + 256 else tileIdx.toNat
+        let byteBase := index * 16 + tr * 2
+        let td := if useBank1 then gpu.tileData1 else gpu.tileData
+        cacheLo    := td.data.get! byteBase
+        cacheHi    := td.data.get! (byteBase + 1)
+        cachePal   := palIdx
+        cacheXFlip := xFlip
+      let tileCol := if cacheXFlip then 7 - bgX % 8 else bgX % 8
+      let loBit   := (cacheLo >>> (7 - tileCol).toUInt8) &&& 1
+      let hiBit   := (cacheHi >>> (7 - tileCol).toUInt8) &&& 1
+      let pixel   := ColorId.ofUInt8 (loBit ||| (hiBit <<< 1))
+      let color   :=
         if gpu.cgbMode then
-          gpu.palettes.cgbBg.lookupColor palIdx pixel.toUInt8.toNat
+          gpu.palettes.cgbBg.lookupColor cachePal pixel.toUInt8.toNat
         else
           dmgGray (gpu.palettes.bgp.lookup pixel).toGray
-      r := r.set! lx color
+      r  := r.set! lx color
+      lx := lx + 1
     return r
   fb.set! ly row'
 
 -- Render window for scanline ly into fb (only if window is visible).
+-- Same tile-caching optimisation as renderBgLine.
 private def renderWindowLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBuffer :=
-  let lc       := gpu.lcdControl
-  let lp       := gpu.lcdPosition
-  let wy       := lp.wy.toNat
-  let wx       := lp.wx.toNat
-  let wxScreen := if wx >= 7 then wx - 7 else 0
+  let lc         := gpu.lcdControl
+  let lp         := gpu.lcdPosition
+  let wy         := lp.wy.toNat
+  let wx         := lp.wx.toNat
+  let wxScreen   := if wx >= 7 then wx - 7 else 0
   if ly < wy || wxScreen >= 160 then fb
   else
-    let yInW     := ly - wy
-    let tileArea  := lc.tileDataArea
+    let yInW       := ly - wy
+    let tileArea   := lc.tileDataArea
     let winMapArea := lc.windowTileMapArea
-    let row := fb[ly]!
+    let winTileRow := yInW % 8
+    let mapRowOff  := (yInW / 8) * 32 + (if winMapArea then 1024 else 0)
+    let row  := fb[ly]!
     let row' := Id.run do
-      let mut r := row
-      for lx in List.range 160 do
-        if lx >= wxScreen then do
-          let xInW    := lx - wxScreen
-          let tileIdx  := getTileMapIndex gpu.tileMap winMapArea xInW yInW
-          let attr     := if gpu.cgbMode then getTileMapIndex gpu.tileAttr winMapArea xInW yInW else 0
-          let yFlip    := gpu.cgbMode && (attr &&& 0x40) != 0
-          let xFlip    := gpu.cgbMode && (attr &&& 0x20) != 0
-          let useBank1 := gpu.cgbMode && (attr &&& 0x08) != 0
-          let palIdx   := (attr &&& 0x07).toNat
-          let tileRow  := if yFlip then 7 - yInW % 8 else yInW % 8
-          let tileCol  := if xFlip then 7 - xInW % 8 else xInW % 8
-          let td       := if useBank1 then gpu.tileData1 else gpu.tileData
-          let pixel    := getTilePixel td tileArea tileIdx tileRow tileCol
-          let color    :=
+      let mut r          := row
+      let mut lx         := wxScreen
+      let mut cacheTileX : Nat   := 9999
+      let mut cacheLo    : UInt8 := 0
+      let mut cacheHi    : UInt8 := 0
+      let mut cachePal   : Nat   := 0
+      let mut cacheXFlip : Bool  := false
+      while lx < screenWidth do
+        let xInW  := lx - wxScreen
+        let tileX := xInW / 8
+        if tileX != cacheTileX then
+          cacheTileX := tileX
+          let tileIdx := gpu.tileMap.data.get! (mapRowOff + tileX)
+          let (tr, xFlip, useBank1, palIdx) :=
             if gpu.cgbMode then
-              gpu.palettes.cgbBg.lookupColor palIdx pixel.toUInt8.toNat
-            else
-              dmgGray (gpu.palettes.bgp.lookup pixel).toGray
-          r := r.set! lx color
+              let a   := gpu.tileAttr.data.get! (mapRowOff + tileX)
+              let yf  := (a &&& 0x40) != 0
+              let xf  := (a &&& 0x20) != 0
+              let bnk := (a &&& 0x08) != 0
+              let pal := (a &&& 0x07).toNat
+              (if yf then 7 - winTileRow else winTileRow, xf, bnk, pal)
+            else (winTileRow, false, false, 0)
+          let index : Nat :=
+            if tileArea then tileIdx.toNat
+            else if tileIdx < 128 then tileIdx.toNat + 256 else tileIdx.toNat
+          let byteBase := index * 16 + tr * 2
+          let td := if useBank1 then gpu.tileData1 else gpu.tileData
+          cacheLo    := td.data.get! byteBase
+          cacheHi    := td.data.get! (byteBase + 1)
+          cachePal   := palIdx
+          cacheXFlip := xFlip
+        let tileCol := if cacheXFlip then 7 - xInW % 8 else xInW % 8
+        let loBit   := (cacheLo >>> (7 - tileCol).toUInt8) &&& 1
+        let hiBit   := (cacheHi >>> (7 - tileCol).toUInt8) &&& 1
+        let pixel   := ColorId.ofUInt8 (loBit ||| (hiBit <<< 1))
+        let color   :=
+          if gpu.cgbMode then
+            gpu.palettes.cgbBg.lookupColor cachePal pixel.toUInt8.toNat
+          else
+            dmgGray (gpu.palettes.bgp.lookup pixel).toGray
+        r  := r.set! lx color
+        lx := lx + 1
       return r
     fb.set! ly row'
 
 -- Render sprites for scanline ly into fb.
+-- Pre-loads each visible sprite's two tile row bytes, eliminating per-column
+-- ByteArray reads.  Uses while loops to avoid List.range allocations.
 private def renderSpriteLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBuffer :=
   let lc   := gpu.lcdControl
   let sprH := lc.spriteHeight
   let row  := fb[ly]!
   let row' := Id.run do
     let mut r := row
-    for i in List.range 40 do
-      let sprite       := gpu.oam.getEntry i
+    -- Iterate 39→0 so sprite 0 (highest priority) is drawn last and wins.
+    let mut i : Nat := 40
+    while i > 0 do
+      i := i - 1
+      let sprite        := gpu.oam.getEntry i
       let spriteScreenY := sprite.screenY
       let lyInt         := Int.ofNat ly
-      if spriteScreenY <= lyInt && lyInt < spriteScreenY + Int.ofNat sprH then do
+      if spriteScreenY <= lyInt && lyInt < spriteScreenY + Int.ofNat sprH then
         let rowInSprite := (lyInt - spriteScreenY).toNat
         let drawRow     := if sprite.yFlip then sprH - rowInSprite - 1 else rowInSprite
         let tileIdx     := if sprH == 16 then sprite.tileIdx &&& 0xFE else sprite.tileIdx
         let dmgPal      := if sprite.palette then gpu.palettes.obp1 else gpu.palettes.obp0
         let spriteTd    := if gpu.cgbMode && sprite.cgbVramBank == 1 then gpu.tileData1
                            else gpu.tileData
-        for col in List.range 8 do
+        -- Pre-load the two tile-data bytes that cover all 8 columns of this row.
+        let byteBase := tileIdx.toNat * 16 + drawRow * 2
+        let spLo := spriteTd.data.get! byteBase
+        let spHi := spriteTd.data.get! (byteBase + 1)
+        let mut col := 0
+        while col < 8 do
           let drawCol := if sprite.xFlip then 7 - col else col
-          let colorId  := getTilePixel spriteTd true tileIdx drawRow drawCol
+          let loBit   := (spLo >>> (7 - drawCol).toUInt8) &&& 1
+          let hiBit   := (spHi >>> (7 - drawCol).toUInt8) &&& 1
+          let colorId := ColorId.ofUInt8 (loBit ||| (hiBit <<< 1))
           if colorId != .White then
             let lx := sprite.screenX + Int.ofNat col
-            if lx >= 0 && lx < 160 then do
+            if lx >= 0 && lx < 160 then
               let lxN   := lx.toNat
               let mapped :=
                 if gpu.cgbMode then
@@ -328,6 +391,7 @@ private def renderSpriteLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBu
                 if r[lxN]! == whitePixel then r := r.set! lxN mapped
               else
                 r := r.set! lxN mapped
+          col := col + 1
     return r
   fb.set! ly row'
 
