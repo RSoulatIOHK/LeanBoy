@@ -25,8 +25,8 @@ namespace LeanBoy.Gpu
 
 open Debug
 
--- A 160×144 frame buffer. Each pixel is a gray value 0–255.
-abbrev FrameBuffer := Array (Array UInt8)
+-- A 160×144 frame buffer. Each pixel is packed RGB888: 0x00RRGGBB.
+abbrev FrameBuffer := Array (Array UInt32)
 
 -- Dot counts for each mode per scanline.
 private def oamDots           : Nat := 80
@@ -38,7 +38,15 @@ private def screenHeight      : Nat := 144
 private def screenWidth       : Nat := 160
 
 def emptyFrameBuffer : FrameBuffer :=
-  Array.replicate screenHeight (Array.replicate screenWidth 255)
+  Array.replicate screenHeight (Array.replicate screenWidth 0x00FFFFFF)
+
+-- Pack a DMG grayscale value into a 0x00RRGGBB pixel.
+private def dmgGray (g : UInt8) : UInt32 :=
+  let v := g.toUInt32
+  (v <<< 16) ||| (v <<< 8) ||| v
+
+-- White pixel constant (for priority/transparency checks).
+private def whitePixel : UInt32 := 0x00FFFFFF
 
 -- Tile data: 384 tiles × 16 bytes each (0x8000–0x97FF).
 structure TileData where
@@ -56,9 +64,13 @@ structure Gpu where
   lcdPosition : LcdPosition := {}
   palettes    : Palettes    := {}
   oam         : OamTable    := {}
-  tileData    : TileData    := {}
-  tileMap     : TileMap     := {}
+  tileData    : TileData    := {}   -- VRAM bank 0 tile data (0x8000–0x97FF)
+  tileData1   : TileData    := {}   -- VRAM bank 1 tile data (CGB only)
+  tileMap     : TileMap     := {}   -- VRAM bank 0 tile map (tile indices)
+  tileAttr    : TileMap     := {}   -- VRAM bank 1 tile map (CGB tile attributes)
+  vramBank    : UInt8       := 0    -- 0 or 1; selected by VBK register (0xFF4F)
   frameBuffer : FrameBuffer := emptyFrameBuffer
+  cgbMode     : Bool        := false
 
 inductive RunResult
   | InFrame
@@ -91,26 +103,26 @@ private def dumpFrameStart (gpu : Gpu) (frameNo : Nat) : IO Unit := do
   log1 s!"[GPU]   TileMap 0x9C00 row0: {hexDump gpu.tileMap.data 1024 32}"
   dumpTileData gpu.tileData.data 4 2
 
--- Dump frame-buffer min/max pixel to confirm rendering ran.
+-- Dump non-white pixel count to confirm rendering ran.
 private def dumpFrameEnd (fb : FrameBuffer) (frameNo : Nat) : IO Unit := do
   if (← getLevel) < 1 then return
-  let mut minPx : UInt8 := 255
-  let mut maxPx : UInt8 := 0
+  let mut nonWhite : Nat := 0
   for row in fb do
     for px in row do
-      if px < minPx then minPx := px
-      if px > maxPx then maxPx := px
-  log1 s!"[GPU] ── Frame {frameNo} end: pixelRange=[{minPx},{maxPx}]"
+      if px != whitePixel then nonWhite := nonWhite + 1
+  log1 s!"[GPU] ── Frame {frameNo} end: nonWhitePixels={nonWhite}"
 
 -- ─── Memory access ────────────────────────────────────────────────────────────
 
 def readByte (gpu : Gpu) (addr : UInt16) : UInt8 :=
-  if addr >= 0x8000 && addr < 0xA000 then
+  if addr >= 0x8000 && addr < 0x9800 then
     let offset := addr.toNat - 0x8000
-    if offset < gpu.tileData.data.size then gpu.tileData.data.get! offset
-    else if offset < 0x2000 then
-      gpu.tileMap.data.get! (offset - 0x1800)
-    else 0xFF
+    let td := if gpu.vramBank == 1 then gpu.tileData1 else gpu.tileData
+    if offset < td.data.size then td.data.get! offset else 0xFF
+  else if addr >= 0x9800 && addr < 0xA000 then
+    let offset := addr.toNat - 0x9800
+    if gpu.vramBank == 1 then gpu.tileAttr.data.get! offset
+    else gpu.tileMap.data.get! offset
   else if addr >= 0xFE00 && addr < 0xFEA0 then
     gpu.oam.readByte addr
   else
@@ -126,15 +138,26 @@ def readByte (gpu : Gpu) (addr : UInt16) : UInt8 :=
     | 0xFF49 => gpu.palettes.obp1.value
     | 0xFF4A => gpu.lcdPosition.wy
     | 0xFF4B => gpu.lcdPosition.wx
+    | 0xFF4F => gpu.vramBank ||| 0xFE   -- VBK: low bit = bank, upper bits = 1
+    | 0xFF68 => gpu.palettes.readByte addr   -- BCPS
+    | 0xFF69 => gpu.palettes.readByte addr   -- BCPD
+    | 0xFF6A => gpu.palettes.readByte addr   -- OCPS
+    | 0xFF6B => gpu.palettes.readByte addr   -- OCPD
     | _      => 0xFF
 
 def writeByte (gpu : Gpu) (addr : UInt16) (v : UInt8) : Gpu :=
   if addr >= 0x8000 && addr < 0x9800 then
     let offset := addr.toNat - 0x8000
-    { gpu with tileData := { data := gpu.tileData.data.set! offset v } }
+    if gpu.vramBank == 1 then
+      { gpu with tileData1 := { data := gpu.tileData1.data.set! offset v } }
+    else
+      { gpu with tileData := { data := gpu.tileData.data.set! offset v } }
   else if addr >= 0x9800 && addr < 0xA000 then
     let offset := addr.toNat - 0x9800
-    { gpu with tileMap := { data := gpu.tileMap.data.set! offset v } }
+    if gpu.vramBank == 1 then
+      { gpu with tileAttr := { data := gpu.tileAttr.data.set! offset v } }
+    else
+      { gpu with tileMap := { data := gpu.tileMap.data.set! offset v } }
   else if addr >= 0xFE00 && addr < 0xFEA0 then
     { gpu with oam := gpu.oam.writeByte addr v }
   else
@@ -168,6 +191,11 @@ def writeByte (gpu : Gpu) (addr : UInt16) (v : UInt8) : Gpu :=
     | 0xFF49 => { gpu with palettes    := gpu.palettes.writeByte addr v }
     | 0xFF4A => { gpu with lcdPosition := gpu.lcdPosition.writeByte addr v }
     | 0xFF4B => { gpu with lcdPosition := gpu.lcdPosition.writeByte addr v }
+    | 0xFF4F => { gpu with vramBank    := v &&& 0x01 }   -- VBK: select VRAM bank 0 or 1
+    | 0xFF68 => { gpu with palettes    := gpu.palettes.writeByte addr v }   -- BCPS
+    | 0xFF69 => { gpu with palettes    := gpu.palettes.writeByte addr v }   -- BCPD
+    | 0xFF6A => { gpu with palettes    := gpu.palettes.writeByte addr v }   -- OCPS
+    | 0xFF6B => { gpu with palettes    := gpu.palettes.writeByte addr v }   -- OCPD
     | _      => gpu
 
 -- ─── Rendering ───────────────────────────────────────────────────────────────
@@ -208,10 +236,23 @@ private def renderBgLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBuffer
   let row' := Id.run do
     let mut r := row
     for lx in List.range 160 do
-      let bgX    := (scx + lx) % 256
-      let tileIdx := getTileMapIndex gpu.tileMap bgMapArea bgX bgY
-      let pixel   := getTilePixel gpu.tileData tileArea tileIdx (bgY % 8) (bgX % 8)
-      let color   := (gpu.palettes.bgp.lookup pixel).toGray
+      let bgX     := (scx + lx) % 256
+      let tileIdx  := getTileMapIndex gpu.tileMap bgMapArea bgX bgY
+      let attr     := if gpu.cgbMode then getTileMapIndex gpu.tileAttr bgMapArea bgX bgY else 0
+      -- CGB tile attributes: bit6=yFlip, bit5=xFlip, bit3=vramBank, bits2-0=palette
+      let yFlip    := gpu.cgbMode && (attr &&& 0x40) != 0
+      let xFlip    := gpu.cgbMode && (attr &&& 0x20) != 0
+      let useBank1 := gpu.cgbMode && (attr &&& 0x08) != 0
+      let palIdx   := (attr &&& 0x07).toNat
+      let tileRow  := if yFlip then 7 - bgY % 8 else bgY % 8
+      let tileCol  := if xFlip then 7 - bgX % 8 else bgX % 8
+      let td       := if useBank1 then gpu.tileData1 else gpu.tileData
+      let pixel    := getTilePixel td tileArea tileIdx tileRow tileCol
+      let color    :=
+        if gpu.cgbMode then
+          gpu.palettes.cgbBg.lookupColor palIdx pixel.toUInt8.toNat
+        else
+          dmgGray (gpu.palettes.bgp.lookup pixel).toGray
       r := r.set! lx color
     return r
   fb.set! ly row'
@@ -235,8 +276,20 @@ private def renderWindowLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBu
         if lx >= wxScreen then do
           let xInW    := lx - wxScreen
           let tileIdx  := getTileMapIndex gpu.tileMap winMapArea xInW yInW
-          let pixel    := getTilePixel gpu.tileData tileArea tileIdx (yInW % 8) (xInW % 8)
-          let color    := (gpu.palettes.bgp.lookup pixel).toGray
+          let attr     := if gpu.cgbMode then getTileMapIndex gpu.tileAttr winMapArea xInW yInW else 0
+          let yFlip    := gpu.cgbMode && (attr &&& 0x40) != 0
+          let xFlip    := gpu.cgbMode && (attr &&& 0x20) != 0
+          let useBank1 := gpu.cgbMode && (attr &&& 0x08) != 0
+          let palIdx   := (attr &&& 0x07).toNat
+          let tileRow  := if yFlip then 7 - yInW % 8 else yInW % 8
+          let tileCol  := if xFlip then 7 - xInW % 8 else xInW % 8
+          let td       := if useBank1 then gpu.tileData1 else gpu.tileData
+          let pixel    := getTilePixel td tileArea tileIdx tileRow tileCol
+          let color    :=
+            if gpu.cgbMode then
+              gpu.palettes.cgbBg.lookupColor palIdx pixel.toUInt8.toNat
+            else
+              dmgGray (gpu.palettes.bgp.lookup pixel).toGray
           r := r.set! lx color
       return r
     fb.set! ly row'
@@ -256,17 +309,23 @@ private def renderSpriteLine (gpu : Gpu) (ly : Nat) (fb : FrameBuffer) : FrameBu
         let rowInSprite := (lyInt - spriteScreenY).toNat
         let drawRow     := if sprite.yFlip then sprH - rowInSprite - 1 else rowInSprite
         let tileIdx     := if sprH == 16 then sprite.tileIdx &&& 0xFE else sprite.tileIdx
-        let pal         := if sprite.palette then gpu.palettes.obp1 else gpu.palettes.obp0
+        let dmgPal      := if sprite.palette then gpu.palettes.obp1 else gpu.palettes.obp0
+        let spriteTd    := if gpu.cgbMode && sprite.cgbVramBank == 1 then gpu.tileData1
+                           else gpu.tileData
         for col in List.range 8 do
           let drawCol := if sprite.xFlip then 7 - col else col
-          let colorId  := getTilePixel gpu.tileData true tileIdx drawRow drawCol
+          let colorId  := getTilePixel spriteTd true tileIdx drawRow drawCol
           if colorId != .White then
             let lx := sprite.screenX + Int.ofNat col
             if lx >= 0 && lx < 160 then do
               let lxN   := lx.toNat
-              let mapped := (pal.lookup colorId).toGray
+              let mapped :=
+                if gpu.cgbMode then
+                  gpu.palettes.cgbObj.lookupColor sprite.cgbPaletteIndex colorId.toUInt8.toNat
+                else
+                  dmgGray (dmgPal.lookup colorId).toGray
               if sprite.priority then
-                if r[lxN]! == 255 then r := r.set! lxN mapped
+                if r[lxN]! == whitePixel then r := r.set! lxN mapped
               else
                 r := r.set! lxN mapped
     return r

@@ -30,17 +30,20 @@ opaque pollEvents : IO UInt32
 @[extern "lean_sdl_audio_queue"]
 opaque queueAudio (samples : ByteArray) : IO Unit
 
--- Convert a FrameBuffer (Array (Array UInt8)) to a flat ByteArray (row-major).
+-- Convert a FrameBuffer (Array (Array UInt32)) to a flat RGB24 ByteArray (row-major).
+-- Each pixel 0x00RRGGBB → three bytes [R, G, B].
 def frameBufferToBytes (fb : Gpu.FrameBuffer) : ByteArray :=
-  let n := fb.size * (if fb.size > 0 then fb[0]!.size else 0)
-  let arr := ByteArray.mk (Array.replicate n 0)
+  let nPx := fb.size * (if fb.size > 0 then fb[0]!.size else 0)
+  let arr := ByteArray.mk (Array.replicate (nPx * 3) 0)
   Id.run do
     let mut a := arr
     let mut i := 0
     for row in fb do
       for px in row do
-        a := a.set! i px
-        i := i + 1
+        a := a.set! i       ((px >>> 16).toUInt8)  -- R
+        a := a.set! (i + 1) ((px >>> 8).toUInt8)   -- G
+        a := a.set! (i + 2) (px.toUInt8)            -- B
+        i := i + 3
     return a
 
 end LeanBoy.Sdl

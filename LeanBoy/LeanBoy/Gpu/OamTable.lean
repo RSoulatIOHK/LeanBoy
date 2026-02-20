@@ -26,10 +26,12 @@ structure OamEntry where
 
 namespace OamEntry
 
-@[inline] def priority (e : OamEntry) : Bool := testBit e.flags 7
-@[inline] def yFlip    (e : OamEntry) : Bool := testBit e.flags 6
-@[inline] def xFlip    (e : OamEntry) : Bool := testBit e.flags 5
-@[inline] def palette  (e : OamEntry) : Bool := testBit e.flags 4  -- false=OBP0, true=OBP1
+@[inline] def priority        (e : OamEntry) : Bool := testBit e.flags 7
+@[inline] def yFlip           (e : OamEntry) : Bool := testBit e.flags 6
+@[inline] def xFlip           (e : OamEntry) : Bool := testBit e.flags 5
+@[inline] def palette         (e : OamEntry) : Bool := testBit e.flags 4  -- DMG: false=OBP0, true=OBP1
+@[inline] def cgbVramBank     (e : OamEntry) : Nat  := if testBit e.flags 3 then 1 else 0
+@[inline] def cgbPaletteIndex (e : OamEntry) : Nat  := (e.flags &&& 0x07).toNat
 
 -- Screen Y of the sprite top pixel.
 @[inline] def screenY (e : OamEntry) : Int := Int.ofNat e.y.toNat - 16

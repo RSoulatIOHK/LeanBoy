@@ -15,6 +15,7 @@ import LeanBoy.Cartridge.RomOnly
 import LeanBoy.Cartridge.Mbc1
 import LeanBoy.Cartridge.Mbc2
 import LeanBoy.Cartridge.Mbc3
+import LeanBoy.Cartridge.Mbc5
 import LeanBoy.Cartridge.Cartridge
 import LeanBoy.Gpu.LcdControl
 import LeanBoy.Gpu.LcdStat

@@ -24,9 +24,18 @@ namespace Emulator
 
 -- Load a ROM from bytes and initialize all hardware to post-boot state.
 def create (romBytes : ByteArray) (printSerial : Bool := false) : IO Emulator := do
-  let cart ← IO.ofExcept (Cartridge.detect romBytes)
-  let bus  ← Bus.create cart printSerial
-  let cpu  := { bus }
+  let cart  ← IO.ofExcept (Cartridge.detect romBytes)
+  let isCgb := romBytes.size > 0x143 && (romBytes.get! 0x143 &&& 0x80) != 0
+  let bus   ← Bus.create cart isCgb printSerial
+  -- Post-boot ROM register state varies by hardware:
+  --   DMG: A=0x01, F=0xB0, BC=0x0013, DE=0x00D8, HL=0x014D
+  --   CGB: A=0x11, F=0x80, BC=0x0000, DE=0xFF56, HL=0x000D
+  -- Games check A=0x11 to activate CGB code paths (palette setup, VRAM banking, etc.)
+  let initRegs : Registers :=
+    if isCgb then { a := 0x11, f := 0x80, b := 0x00, c := 0x00
+                  , d := 0xFF, e := 0x56, h := 0x00, l := 0x0D }
+    else          {}   -- DMG defaults from Registers struct
+  let cpu     := { bus, registers := initRegs }
   let cpuRef  ← IO.mkRef cpu
   let frameNo ← IO.mkRef 0
   -- Dump initial LCD state so we have a baseline even before frame 1.

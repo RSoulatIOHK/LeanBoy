@@ -40,27 +40,31 @@ structure Bus where
   cartridge   : IO.Ref Cartridge
   gpu         : IO.Ref Gpu
   apu         : IO.Ref Apu
-  wram        : IO.Ref Ram         -- 0xC000–0xDFFF
+  wram        : IO.Ref ByteArray   -- 32 KB flat (8 banks × 4 KB); bank N at offset N*0x1000
+  wramBank    : IO.Ref UInt8       -- current bank for 0xD000–0xDFFF (1–7; 0 treated as 1)
   hram        : IO.Ref Ram         -- 0xFF80–0xFFFE
   timer       : IO.Ref Timer
   joypad      : IO.Ref Joypad
   serialPort  : IO.Ref SerialPort
   interrupt   : IO.Ref InterruptController
+  isCgb       : Bool
   printSerial : Bool
 
 namespace Bus
 
-def create (cart : Cartridge) (printSerial : Bool := false) : IO Bus := do
+def create (cart : Cartridge) (isCgb : Bool := false) (printSerial : Bool := false) : IO Bus := do
   return {
     cartridge  := ← IO.mkRef cart
-    gpu        := ← IO.mkRef {}
+    gpu        := ← IO.mkRef { cgbMode := isCgb }
     apu        := ← IO.mkRef {}
-    wram       := ← IO.mkRef (Ram.create 0xC000 0xDFFF)
+    wram       := ← IO.mkRef (ByteArray.mk (Array.replicate 0x8000 0))  -- 32 KB, 8 banks × 4 KB
+    wramBank   := ← IO.mkRef 1  -- bank 1 default (SVBK=0 → bank 1 per spec)
     hram       := ← IO.mkRef (Ram.create 0xFF80 0xFFFE)
     timer      := ← IO.mkRef {}
     joypad     := ← IO.mkRef {}
     serialPort := ← IO.mkRef {}
     interrupt  := ← IO.mkRef {}
+    isCgb
     printSerial
   }
 
@@ -76,11 +80,17 @@ def readByte (bus : Bus) (addr : UInt16) : IO UInt8 := do
     return cart.readByte addr
   else if addr < 0xE000 then
     let wram ← bus.wram.get
-    return wram.readByte addr
+    let wb   ← bus.wramBank.get
+    let bank  := if addr < 0xD000 then 0 else wb.toNat
+    let off   := if addr < 0xD000 then addr.toNat - 0xC000 else addr.toNat - 0xD000
+    return wram.get! (bank * 0x1000 + off)
   else if addr < 0xFE00 then
-    -- Echo RAM: mirror of WRAM
+    -- Echo RAM: mirrors WRAM (0xE000-0xEFFF → bank 0; 0xF000-0xFDFF → switched bank)
     let wram ← bus.wram.get
-    return wram.readByte (addr - 0x2000)
+    let wb   ← bus.wramBank.get
+    let bank  := if addr < 0xF000 then 0 else wb.toNat
+    let off   := if addr < 0xF000 then addr.toNat - 0xE000 else addr.toNat - 0xF000
+    return wram.get! (bank * 0x1000 + off)
   else if addr < 0xFEA0 then
     let gpu ← bus.gpu.get
     return gpu.readByte addr   -- OAM
@@ -101,6 +111,12 @@ def readByte (bus : Bus) (addr : UInt16) : IO UInt8 := do
   else if addr >= 0xFF10 && addr < 0xFF40 then
     let apu ← bus.apu.get
     return apu.readByte addr   -- APU registers + Wave RAM
+  else if addr == 0xFF70 then
+    -- SVBK: WRAM bank register (CGB only)
+    if bus.isCgb then
+      let wb ← bus.wramBank.get
+      return wb
+    else return 0xFF
   else if addr < 0xFF80 then
     let gpu ← bus.gpu.get
     return gpu.readByte addr   -- GPU registers
@@ -127,9 +143,16 @@ def writeByte (bus : Bus) (addr : UInt16) (v : UInt8) : IO Unit := do
   else if addr < 0xC000 then
     bus.cartridge.modify (fun c => c.writeByte addr v)
   else if addr < 0xE000 then
-    bus.wram.modify (fun r => r.writeByte addr v)
+    let wb   ← bus.wramBank.get
+    let bank  := if addr < 0xD000 then 0 else wb.toNat
+    let off   := if addr < 0xD000 then addr.toNat - 0xC000 else addr.toNat - 0xD000
+    bus.wram.modify (fun w => w.set! (bank * 0x1000 + off) v)
   else if addr < 0xFE00 then
-    bus.wram.modify (fun r => r.writeByte (addr - 0x2000) v)
+    -- Echo RAM write mirrors WRAM
+    let wb   ← bus.wramBank.get
+    let bank  := if addr < 0xF000 then 0 else wb.toNat
+    let off   := if addr < 0xF000 then addr.toNat - 0xE000 else addr.toNat - 0xF000
+    bus.wram.modify (fun w => w.set! (bank * 0x1000 + off) v)
   else if addr < 0xFEA0 then
     bus.gpu.modify (fun g => g.writeByte addr v)
   else if addr < 0xFF00 then
@@ -146,6 +169,11 @@ def writeByte (bus : Bus) (addr : UInt16) (v : UInt8) : IO Unit := do
     bus.interrupt.modify (fun ic => ic.writeByte addr v)
   else if addr >= 0xFF10 && addr < 0xFF40 then
     bus.apu.modify (fun a => a.writeByte addr v)  -- APU registers + Wave RAM
+  else if addr == 0xFF70 then
+    -- SVBK: WRAM bank select (CGB only; 0 → bank 1 per spec)
+    if bus.isCgb then
+      let bank := let b := v &&& 0x07; if b == 0 then 1 else b
+      bus.wramBank.set bank
   else if addr == 0xFF46 then
     dmaTransfer bus v
   else if addr < 0xFF80 then
