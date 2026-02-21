@@ -42,7 +42,8 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
     }
     g_window = SDL_CreateWindow("LeanBoy",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        GB_W * SCALE, GB_H * SCALE, SDL_WINDOW_SHOWN);
+        GB_W * SCALE, GB_H * SCALE,
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!g_window) {
         DBG(1, "SDL_CreateWindow failed: %s", SDL_GetError());
         SDL_Quit();
@@ -55,6 +56,7 @@ lean_obj_res lean_sdl_init(lean_obj_arg world) {
         SDL_DestroyWindow(g_window); SDL_Quit();
         return lean_io_result_mk_ok(lean_box(0xFFFFFFFF));
     }
+    SDL_RenderSetLogicalSize(g_renderer, GB_W, GB_H);
     g_texture = SDL_CreateTexture(g_renderer,
         SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, GB_W, GB_H);
     if (!g_texture) {
