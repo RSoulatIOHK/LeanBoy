@@ -51,7 +51,7 @@ def setLycLyFlag (s : LcdStat) (v : Bool) : LcdStat :=
 
 -- Writable bits are 3–6 only.
 def write (s : LcdStat) (v : UInt8) : LcdStat :=
-  { s with value := (s.value &&& 0x07) ||| (v &&& 0x78) }
+  { s with value := 0x80 ||| (s.value &&& 0x07) ||| (v &&& 0x78) }
 
 end LcdStat
 
